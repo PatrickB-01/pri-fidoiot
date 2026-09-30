@@ -10,7 +10,8 @@ import org.fidoalliance.fdo.protocol.InvalidMessageException;
 
 public enum ProtocolVersion {
   V100(100),
-  V101(101);
+  V101(101),
+  V200(200);
 
   private final int id;
 
@@ -54,6 +55,8 @@ public enum ProtocolVersion {
         return ProtocolVersion.V100;
       case "101":
         return ProtocolVersion.V101;
+      case "200":
+        return ProtocolVersion.V200;
       default:
         break;
     }

@@ -9,15 +9,34 @@ import org.apache.commons.codec.DecoderException;
 import org.apache.commons.codec.binary.Hex;
 import org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider;
 import org.fidoalliance.fdo.protocol.message.AnyType;
+import org.fidoalliance.fdo.protocol.message.ErrorCode;
 import org.fidoalliance.fdo.protocol.message.Hash;
 import org.fidoalliance.fdo.protocol.message.HashType;
 import org.fidoalliance.fdo.protocol.message.OwnerPublicKey;
 import org.fidoalliance.fdo.protocol.message.PublicKeyEncoding;
 import org.fidoalliance.fdo.protocol.message.PublicKeyType;
+import org.fidoalliance.fdo.protocol.message.ProtocolVersion;
+import org.fidoalliance.fdo.protocol.message.MsgType;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 public class SerializationTest {
+
+  @Test
+  public void version200IdentifiersPreserveLegacyDefaults() throws Exception {
+    Assertions.assertEquals(ProtocolVersion.V101, ProtocolVersion.current());
+    Assertions.assertEquals(ProtocolVersion.V200, ProtocolVersion.fromString("200"));
+    Assertions.assertEquals(ProtocolVersion.V200, ProtocolVersion.fromNumber(200));
+    for (int type = 80; type <= 91; type++) {
+      DispatchMessage message = HttpUtils.getMessageFromUri("/fdo/200/msg/" + type);
+      Assertions.assertEquals(ProtocolVersion.V200, message.getProtocolVersion());
+      Assertions.assertEquals(type, message.getMsgType().toInteger());
+    }
+    Assertions.assertEquals(MsgType.TO2_HELLO_DEVICE,
+        HttpUtils.getMessageFromUri("/fdo/101/msg/60").getMsgType());
+    Assertions.assertEquals(ErrorCode.SWITCH_VERSION, ErrorCode.fromNumber(7));
+    Assertions.assertEquals(ErrorCode.CHANGE_CAP_ERROR, ErrorCode.fromNumber(103));
+  }
 
   @Test
   public void cborAndCryptoBaseline() throws Exception {

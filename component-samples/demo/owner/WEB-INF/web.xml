@@ -21,6 +21,13 @@
       <url-pattern>/fdo/101/msg/68</url-pattern>
       <url-pattern>/fdo/101/msg/70</url-pattern>
       <url-pattern>/fdo/101/msg/255</url-pattern>
+    <url-pattern>/fdo/200/msg/80</url-pattern>
+    <url-pattern>/fdo/200/msg/82</url-pattern>
+    <url-pattern>/fdo/200/msg/84</url-pattern>
+    <url-pattern>/fdo/200/msg/86</url-pattern>
+    <url-pattern>/fdo/200/msg/88</url-pattern>
+    <url-pattern>/fdo/200/msg/90</url-pattern>
+    <url-pattern>/fdo/200/msg/255</url-pattern>
    </servlet-mapping>
 
    
