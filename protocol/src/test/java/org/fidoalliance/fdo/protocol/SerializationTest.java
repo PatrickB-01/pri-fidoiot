@@ -1,19 +1,38 @@
 package org.fidoalliance.fdo.protocol;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.Arrays;
 
 import org.apache.commons.codec.DecoderException;
 import org.apache.commons.codec.binary.Hex;
+import org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider;
 import org.fidoalliance.fdo.protocol.message.AnyType;
 import org.fidoalliance.fdo.protocol.message.Hash;
 import org.fidoalliance.fdo.protocol.message.HashType;
 import org.fidoalliance.fdo.protocol.message.OwnerPublicKey;
 import org.fidoalliance.fdo.protocol.message.PublicKeyEncoding;
 import org.fidoalliance.fdo.protocol.message.PublicKeyType;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 public class SerializationTest {
+
+  @Test
+  public void cborAndCryptoBaseline() throws Exception {
+    Hash original = new Hash();
+    original.setHashType(HashType.SHA256);
+    original.setHashValue(new byte[] {1, 2, 3});
+    Hash decoded = Mapper.INSTANCE.readValue(Mapper.INSTANCE.writeValue(original), Hash.class);
+    Assertions.assertEquals(original.getHashType(), decoded.getHashType());
+    Assertions.assertArrayEquals(original.getHashValue(), decoded.getHashValue());
+
+    MessageDigest digest = MessageDigest.getInstance("SHA-256", new BouncyCastleFipsProvider());
+    Assertions.assertEquals(
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        Hex.encodeHexString(digest.digest("abc".getBytes(StandardCharsets.US_ASCII))));
+  }
 
   @Test
   public void Test() throws DecoderException, IOException {
