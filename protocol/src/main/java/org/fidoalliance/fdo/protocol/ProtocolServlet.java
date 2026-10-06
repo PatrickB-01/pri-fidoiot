@@ -129,6 +129,7 @@ public class ProtocolServlet extends HttpServlet {
                             String path) {
     int previousType = 0;
     boolean incomingError = path.equals("/fdo/200/msg/255");
+    DispatchMessage message = null;
     try {
       if (path.matches("/fdo/200/msg/(0|[1-9][0-9]{0,2})")) {
         int routeType = Integer.parseInt(path.substring(path.lastIndexOf('/') + 1));
@@ -136,19 +137,8 @@ public class ProtocolServlet extends HttpServlet {
           previousType = routeType;
         }
       }
-      if (!path.matches("/fdo/200/msg/(80|82|84|86|88|90|255)")) {
-        throw new IOException("invalid request route");
-      }
-      DispatchMessage message = HttpUtils.getMessageFromUri(path);
+      message = HttpUtils.getMessageFromUri(path);
       previousType = message.getMsgType().toInteger();
-      if (!HttpUtils.HTTP_APPLICATION_CBOR.equalsIgnoreCase(request.getContentType())) {
-        throw new IOException("invalid content type");
-      }
-      List<String> types = Collections.list(request.getHeaders(HttpUtils.HTTP_MESSAGE_TYPE));
-      if (types.size() > 1 || (!types.isEmpty()
-          && !Integer.toString(previousType).equals(types.get(0)))) {
-        throw new IOException("invalid message type header");
-      }
       List<String> tokens = Collections.list(request.getHeaders(HttpUtils.HTTP_AUTHORIZATION));
       if (tokens.size() > 1) {
         throw new IOException("duplicate authorization header");
@@ -160,6 +150,17 @@ public class ProtocolServlet extends HttpServlet {
           throw new IOException("invalid authorization header");
         }
         message.setAuthToken(token);
+      }
+      if (!path.matches("/fdo/200/msg/(80|82|84|86|88|90|255)")) {
+        throw new IOException("invalid request route");
+      }
+      if (!HttpUtils.HTTP_APPLICATION_CBOR.equalsIgnoreCase(request.getContentType())) {
+        throw new IOException("invalid content type");
+      }
+      List<String> types = Collections.list(request.getHeaders(HttpUtils.HTTP_MESSAGE_TYPE));
+      if (types.size() > 1 || (!types.isEmpty()
+          && !Integer.toString(previousType).equals(types.get(0)))) {
+        throw new IOException("invalid message type header");
       }
       long declaredLength = request.getContentLengthLong();
       if (declaredLength > To2Codec.MAX_MESSAGE_BYTES) {
@@ -191,6 +192,15 @@ public class ProtocolServlet extends HttpServlet {
       logger.info("v200 type " + previousType + " bytes " + raw.length
           + " status " + response.getStatus());
     } catch (Exception exception) {
+      Optional<DispatchMessage> failureReply = Optional.empty();
+      try {
+        MessageDispatcher dispatcher = getDispatcher();
+        if (message != null && dispatcher instanceof VersionMessageDispatcher) {
+          failureReply = ((VersionMessageDispatcher) dispatcher).failure(message, 100);
+        }
+      } catch (Exception unavailable) {
+        logger.info("v200 session failure handler unavailable");
+      }
       if (incomingError) {
         response.setStatus(200);
         response.setContentLength(0);
@@ -199,7 +209,15 @@ public class ProtocolServlet extends HttpServlet {
       response.setStatus(500);
       response.setHeader(HttpUtils.HTTP_MESSAGE_TYPE, "255");
       try {
-        writeVersion200(response, To2Codec.error(100, previousType));
+        if (failureReply.isPresent()) {
+          DispatchMessage error = failureReply.get();
+          if (error.getAuthToken().isPresent()) {
+            response.setHeader(HttpUtils.HTTP_AUTHORIZATION, error.getAuthToken().get());
+          }
+          writeVersion200(response, error.getMessage());
+        } else {
+          writeVersion200(response, To2Codec.error(100, previousType));
+        }
       } catch (IOException failure) {
         logger.error("v200 error response unavailable");
       }

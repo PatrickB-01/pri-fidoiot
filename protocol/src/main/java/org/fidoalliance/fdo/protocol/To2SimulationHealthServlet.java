@@ -1,5 +1,6 @@
 package org.fidoalliance.fdo.protocol;
 
+import com.upokecenter.cbor.CBORObject;
 import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -13,7 +14,11 @@ public class To2SimulationHealthServlet extends HttpServlet {
     response.setContentType("application/json");
     response.setCharacterEncoding("UTF-8");
     response.setHeader("Cache-Control", "no-store");
-    response.getWriter().write(
-        "{\"status\":\"runtime-ready\",\"to2_implemented\":false}");
+    boolean configured = Config.getWorker(To2V2Dispatcher.class).isConfigured();
+    CBORObject health = CBORObject.NewMap();
+    health.Add("status", "runtime-ready");
+    health.Add("to2_implemented", configured);
+    health.Add("est_implemented", false);
+    response.getWriter().write(health.ToJSONString());
   }
 }

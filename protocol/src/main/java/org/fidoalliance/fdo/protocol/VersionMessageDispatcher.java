@@ -19,6 +19,22 @@ public class VersionMessageDispatcher implements MessageDispatcher {
     this.version200 = version200;
   }
 
+  /**
+   * Routes a rejected v200 transport request to its session cleanup boundary.
+   * @param request rejected request metadata
+   * @param code sanitized error code
+   * @return phase-correct response
+   * @throws IOException unavailable handler
+   */
+  public Optional<DispatchMessage> failure(DispatchMessage request, int code) throws IOException {
+    MessageDispatcher selected = version200 == null
+        ? Config.getWorker(To2V2Dispatcher.class) : version200;
+    if (!(selected instanceof To2V2Dispatcher)) {
+      throw new IOException("v200 failure handler unavailable");
+    }
+    return ((To2V2Dispatcher) selected).failure(request, code);
+  }
+
   @Override
   public Optional<DispatchMessage> dispatch(DispatchMessage request) throws IOException {
     int type = request.getMsgType().toInteger();
