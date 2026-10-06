@@ -21,6 +21,138 @@ import org.junit.jupiter.api.Test;
 public class To2WireTest {
 
     @Test
+    public void estSupplierDefersSecretsAndRequiresAuthorizationAndMatchingReady() throws Exception {
+    Path root = Files.createTempDirectory("est-isolated-test-");
+    Path plans = root.resolve("plans");
+    Path control = root.resolve("control");
+    Files.createDirectory(plans, PosixFilePermissions.asFileAttribute(
+        PosixFilePermissions.fromString("rwx------")));
+    Files.createDirectory(control, PosixFilePermissions.asFileAttribute(
+        PosixFilePermissions.fromString("rwx------")));
+    byte[] guid = new byte[16];
+    String name = Hex.encodeHexString(guid);
+    Files.writeString(plans.resolve("index.json"), "{\"" + name + "\":\"plan.cbor\"}");
+    CBORObject config = CBORObject.FromJSONString("{\"schema_version\":1,"
+        + "\"origin\":\"https://est-server:8443\",\"revision\":1,"
+        + "\"trust_anchor_files\":[\"ca.der\"],\"authentication\":{\"method\":\"basic\","
+        + "\"username\":\"isolated-device\",\"password_ref\":\"password.txt\"},"
+        + "\"csr_key_policy\":{\"algorithms\":[\"P256\"],\"default\":\"P256\"},"
+        + "\"csr_subject_policy\":{\"common_names\":[\"isolated-device\"],"
+        + "\"dns_names\":[],\"ip_addresses\":[]},"
+        + "\"csrattrs_policy\":{\"query\":true,\"required\":false,\"format\":\"rfc9908\"},"
+        + "\"retry_policy\":{\"max_attempts\":3,\"deadline_seconds\":600,"
+        + "\"max_retry_after_seconds\":120}}");
+    config.Add("expires_at", java.time.Instant.now().getEpochSecond() + 1800);
+    CBORObject plan = CBORObject.NewMap();
+    plan.Add("configuration", config);
+    plan.Add("expected_revision", 0);
+    plan.Add("mode", "replace");
+    plan.Add("remove_fields", CBORObject.NewArray());
+    Path planPath = plans.resolve("plan.cbor");
+    Files.write(planPath, plan.EncodeToBytes());
+    Files.setPosixFilePermissions(planPath, PosixFilePermissions.fromString("rw-------"));
+    Files.write(plans.resolve("ca.der"), new byte[1400]);
+    EstBootstrapPlanSupplier supplier = new EstBootstrapPlanSupplier(plans, control);
+    Assertions.assertTrue(supplier.contains(guid));
+    Assertions.assertThrows(IOException.class, () -> supplier.authenticatedPlan(guid));
+    byte[] password = To2Crypto.random(32);
+    String credential = Hex.encodeHexString(password);
+    Path passwordPath = plans.resolve("password.txt");
+    Files.writeString(passwordPath, credential);
+    Files.setPosixFilePermissions(passwordPath, PosixFilePermissions.fromString("rw-------"));
+    Assertions.assertThrows(IOException.class, () -> supplier.authenticatedPlan(guid));
+    CBORObject authorized = CBORObject.NewMap();
+    authorized.Add("guid", guid);
+    authorized.Add("origin", config.get("origin"));
+    authorized.Add("label", CBORObject.Null);
+    authorized.Add("username", "isolated-device");
+    authorized.Add("password_sha256", java.security.MessageDigest.getInstance("SHA-256")
+        .digest(credential.getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+    authorized.Add("csr_key_policy", config.get("csr_key_policy"));
+    authorized.Add("csr_subject_policy", config.get("csr_subject_policy"));
+    authorized.Add("expires_at", config.get("expires_at"));
+    Path controlPath = control.resolve(name + ".cbor");
+    Files.write(controlPath, authorized.EncodeToBytes());
+    Files.setPosixFilePermissions(controlPath, PosixFilePermissions.fromString("rw-------"));
+    CBORObject resolved = supplier.authenticatedPlan(guid).get("configuration");
+    Assertions.assertFalse(resolved.get("authentication").ContainsKey("password_ref"));
+    Assertions.assertEquals(credential, resolved.get("authentication").get("password").AsString());
+    org.fidoalliance.fdo.protocol.message.ServiceInfoModuleState state =
+        new org.fidoalliance.fdo.protocol.message.ServiceInfoModuleState();
+    state.setMtu(512);
+    try (EstOwnerModule module = new EstOwnerModule(supplier, guid)) {
+        module.prepare(state);
+        module.send(state, item -> true);
+        org.fidoalliance.fdo.protocol.message.ServiceInfoKeyValuePair active =
+            new org.fidoalliance.fdo.protocol.message.ServiceInfoKeyValuePair();
+        active.setKeyName("com.example.est-1:active");
+        active.setValue(CBORObject.True.EncodeToBytes());
+        module.receive(state, active);
+        java.util.List<org.fidoalliance.fdo.protocol.message.ServiceInfoKeyValuePair> sent =
+            new java.util.ArrayList<>();
+        module.send(state, item -> {
+        Assertions.assertTrue(EstOwnerModule.fits(item, 512));
+        org.fidoalliance.fdo.protocol.message.ServiceInfoKeyValuePair copy =
+            new org.fidoalliance.fdo.protocol.message.ServiceInfoKeyValuePair();
+        copy.setKeyName(item.getKey());
+        copy.setValue(item.getValue().clone());
+        sent.add(copy);
+        return true;
+        });
+        Assertions.assertTrue(sent.stream().anyMatch(item -> item.getKey().endsWith(":blob-part")));
+        Assertions.assertFalse(state.isDone());
+        CBORObject finish = To2Codec.decodeObject(sent.get(sent.size() - 1).getValue());
+        CBORObject status = CBORObject.NewMap();
+        status.Add("transaction_id", finish.get("transaction_id"));
+        status.Add("status", "ready");
+        status.Add("revision", 1);
+        status.Add("digest", new byte[32]);
+        org.fidoalliance.fdo.protocol.message.ServiceInfoKeyValuePair ready =
+            new org.fidoalliance.fdo.protocol.message.ServiceInfoKeyValuePair();
+        ready.setKeyName("com.example.est-1:status");
+        ready.setValue(status.EncodeToBytes());
+        Assertions.assertThrows(IOException.class, () -> module.receive(state, ready));
+        status.set("digest", finish.get("digest"));
+        ready.setValue(status.EncodeToBytes());
+        module.receive(state, ready);
+        Assertions.assertTrue(state.isDone());
+    }
+    authorized.set("password_sha256", CBORObject.FromObject(new byte[32]));
+    Files.write(controlPath, authorized.EncodeToBytes());
+    Assertions.assertThrows(IOException.class, () -> supplier.authenticatedPlan(guid));
+    Files.setPosixFilePermissions(passwordPath, PosixFilePermissions.fromString("rw-r--r--"));
+    Assertions.assertThrows(IOException.class, () -> supplier.authenticatedPlan(guid));
+    }
+
+    @Test
+    public void estCanonicalDigestMatchesPythonTextMapVector() throws Exception {
+        CBORObject value = CBORObject.FromJSONString("{\"long\":{\"b\":2,\"aa\":1},\"a\":1}");
+        Assertions.assertEquals("a2616101646c6f6e67a261620262616101",
+                Hex.encodeHexString(EstBootstrapPlanSupplier.canonical(value)));
+        org.fidoalliance.fdo.protocol.message.ServiceInfoModuleState state =
+                new org.fidoalliance.fdo.protocol.message.ServiceInfoModuleState();
+        try (EstOwnerModule module = new EstOwnerModule(null, new byte[16])) {
+            module.prepare(state);
+            AtomicInteger sent = new AtomicInteger();
+            module.send(state, item -> {
+                Assertions.assertEquals("com.example.est-1:active", item.getKey());
+                Assertions.assertEquals(CBORObject.True, To2Codec.decodeObject(item.getValue()));
+                Assertions.assertTrue(EstOwnerModule.fits(item, 128));
+                sent.incrementAndGet();
+                return true;
+            });
+            Assertions.assertEquals(1, sent.get());
+            Assertions.assertTrue(state.getActiveSent());
+            Assertions.assertFalse(state.isDone());
+            org.fidoalliance.fdo.protocol.message.ServiceInfoKeyValuePair unavailable =
+                    new org.fidoalliance.fdo.protocol.message.ServiceInfoKeyValuePair();
+            unavailable.setKeyName("com.example.est-1:active");
+            unavailable.setValue(CBORObject.False.EncodeToBytes());
+            Assertions.assertThrows(IOException.class, () -> module.receive(state, unavailable));
+        }
+    }
+
+    @Test
     public void installedAdapterHookAndUnavailableProviderFailClosed() throws Exception {
         To2Algorithms base = To2Algorithms.classical();
         To2Algorithms.HashAdapter alias = new To2Algorithms.HashAdapter() {

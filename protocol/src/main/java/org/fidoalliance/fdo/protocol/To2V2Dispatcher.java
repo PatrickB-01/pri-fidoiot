@@ -22,6 +22,8 @@ import org.fidoalliance.fdo.protocol.dispatch.MessageDispatcher;
 import org.fidoalliance.fdo.protocol.message.ErrorCode;
 import org.fidoalliance.fdo.protocol.message.MsgType;
 import org.fidoalliance.fdo.protocol.message.ProtocolVersion;
+import org.fidoalliance.fdo.protocol.message.ServiceInfoKeyValuePair;
+import org.fidoalliance.fdo.protocol.message.ServiceInfoModuleState;
 import org.fidoalliance.fdo.protocol.message.v200.To2Codec;
 import org.fidoalliance.fdo.protocol.message.v200.To2Messages;
 
@@ -31,6 +33,7 @@ public class To2V2Dispatcher implements MessageDispatcher, AutoCloseable {
   public static final int OWNER_PROOF_LIMIT = 1300;
   private static final int SERVICE_INFO_LIMIT = 8192;
   private final To2OwnerFixtures fixtures;
+  private final EstBootstrapPlanSupplier estPlans;
   private final To2Algorithms algorithms;
   private final To2Algorithms.Policy policy;
   private final To2SessionStore<Session> sessions;
@@ -64,6 +67,8 @@ public class To2V2Dispatcher implements MessageDispatcher, AutoCloseable {
     private int moduleOffset;
     private byte[] terminalRequest;
     private byte[] terminalResponse;
+    private EstOwnerModule est;
+    private ServiceInfoModuleState estState;
 
     private Session(To2OwnerFixtures.Identity identity, byte[] probe, int deviceLimit,
             To2Algorithms.HashAdapter hash) {
@@ -76,6 +81,11 @@ public class To2V2Dispatcher implements MessageDispatcher, AutoCloseable {
     }
 
     private void releaseSecrets() {
+      if (est != null) {
+        est.close();
+        est = null;
+        estState = null;
+      }
       if (channel != null) {
         channel.close();
         channel = null;
@@ -131,6 +141,12 @@ public class To2V2Dispatcher implements MessageDispatcher, AutoCloseable {
   private To2V2Dispatcher(To2OwnerFixtures fixtures, java.util.function.LongSupplier clock,
                           boolean sweep, To2Algorithms installed) throws IOException {
     this.fixtures = fixtures;
+    String plans = System.getProperty("to2.est.plan.directory");
+    String authorization = System.getProperty("to2.est.authorization.directory");
+    To2Crypto.require((plans == null) == (authorization == null));
+    To2Crypto.require(plans == null || fixtures != null);
+    estPlans = plans == null ? null
+      : new EstBootstrapPlanSupplier(Path.of(plans), Path.of(authorization));
     try {
       To2Crypto.require(installed != null);
       algorithms = installed;
@@ -421,6 +437,15 @@ public class To2V2Dispatcher implements MessageDispatcher, AutoCloseable {
     CBORObject outgoing = CBORObject.NewArray();
     if (!moreDevice) {
       validateDevmod(session);
+      if (estPlans != null && session.est == null && !session.done) {
+        To2Crypto.require(session.modules.contains(EstOwnerModule.NAME)
+            && estPlans.contains(session.guid));
+        session.est = new EstOwnerModule(estPlans, session.guid);
+        session.estState = new ServiceInfoModuleState();
+        session.estState.setName(EstOwnerModule.NAME);
+        session.estState.setMtu(Math.min(session.deviceLimit, session.ownerInfoLimit));
+        session.est.prepare(session.estState);
+      }
       while (!session.pending.isEmpty()) {
         CBORObject candidate = To2Codec.decodeObject(outgoing.EncodeToBytes());
         candidate.Add(session.pending.peek());
@@ -431,9 +456,25 @@ public class To2V2Dispatcher implements MessageDispatcher, AutoCloseable {
         }
         outgoing.Add(session.pending.remove());
       }
+      if (session.est != null && session.pending.isEmpty()) {
+        session.est.send(session.estState, item -> {
+          CBORObject candidate = To2Codec.decodeObject(outgoing.EncodeToBytes());
+          candidate.Add(To2Crypto.array(item.getKey(), item.getValue().clone()));
+          int size = To2Crypto.array(false, false, candidate).EncodeToBytes().length + 40;
+          if (size > session.estState.getMtu()) {
+            To2Crypto.require(outgoing.size() > 0);
+            return false;
+          }
+          outgoing.Add(To2Crypto.array(item.getKey(), item.getValue().clone()));
+          return true;
+        });
+      }
     }
-    session.moreOwner = !moreDevice && !session.pending.isEmpty();
-    session.done = !moreDevice && outgoing.size() == 0 && session.pending.isEmpty();
+    boolean moreEst = session.estState != null && session.estState.isMore();
+    session.moreOwner = !moreDevice && (!session.pending.isEmpty() || moreEst);
+    boolean readyEst = estPlans == null
+        || (session.estState != null && session.estState.isDone());
+    session.done = !moreDevice && outgoing.size() == 0 && session.pending.isEmpty() && readyEst;
     if (session.done) {
       session.expected = MsgType.TO2_DONE20;
     }
@@ -445,6 +486,14 @@ public class To2V2Dispatcher implements MessageDispatcher, AutoCloseable {
   private void receiveServiceInfo(Session session, CBORObject item) throws IOException {
     String name = item.get(0).AsString();
     CBORObject value = To2Codec.decodeObject(item.get(1).GetByteString());
+    if (name.startsWith(EstOwnerModule.NAME + ":") && estPlans != null) {
+      To2Crypto.require(session.est != null && !session.done);
+      ServiceInfoKeyValuePair pair = new ServiceInfoKeyValuePair();
+      pair.setKeyName(name);
+      pair.setValue(item.get(1).GetByteString());
+      session.est.receive(session.estState, pair);
+      return;
+    }
     if (!name.startsWith("devmod:")) {
       To2Crypto.require(name.matches("[a-zA-Z0-9._-]{1,128}:active")
           && value.getType() == CBORType.Boolean && session.pending.size() < 128);
