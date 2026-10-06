@@ -368,6 +368,7 @@ public class StandardHttpServer implements HttpServer {
   protected KeyStore loadKeystore() throws IOException {
 
     PrivateKey privateKey = null;
+    boolean installed = false;
     try {
       KeyStore ks = KeyStore.getInstance("PEM");
       ks.load(null,"".toCharArray());
@@ -377,14 +378,17 @@ public class StandardHttpServer implements HttpServer {
       pemString = Files.readString(Path.of(config.getServerCert()));
       List<Certificate> certs = PemLoader.loadCerts(pemString);
 
-      ks.setKeyEntry("0",privateKey,"".toCharArray(),
-          certs.stream().toArray(Certificate[]::new));
+      Certificate[] chain = certs.toArray(new Certificate[0]);
+      ks.setKeyEntry("0", privateKey, new char[0], chain);
+      installed = true;
 
       return ks;
     } catch (KeyStoreException | CertificateException | NoSuchAlgorithmException e) {
       throw new IOException(e);
     } finally {
-      Config.getWorker(CryptoService.class).destroyKey(privateKey);
+      if (!installed) {
+        Config.getWorker(CryptoService.class).destroyKey(privateKey);
+      }
     }
   }
 
