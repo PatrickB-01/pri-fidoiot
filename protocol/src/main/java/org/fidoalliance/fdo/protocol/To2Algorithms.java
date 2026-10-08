@@ -440,14 +440,20 @@ public final class To2Algorithms {
     private final List<KexAdapter> exchanges;
     private final List<CipherAdapter> ciphers;
     private final int minimum;
+    private final boolean hybrid;
 
     private Policy(List<String> hashNames, List<String> kexNames, List<String> cipherNames,
-                   int minimum) throws IOException, GeneralSecurityException {
+             int minimum, boolean hybrid) throws IOException, GeneralSecurityException {
       To2Crypto.require(minimum == 128 || minimum == 192);
       this.minimum = minimum;
-      hashes = allowed(To2Algorithms.this.hashes, hashNames, minimum);
-      exchanges = allowed(To2Algorithms.this.exchanges, kexNames, minimum);
-      ciphers = allowed(To2Algorithms.this.ciphers, cipherNames, minimum);
+      this.hybrid = hybrid;
+      boolean bound = hashNames.equals(List.of("SHA384"))
+          && kexNames.equals(List.of(To2HybridKex.NAME))
+          && cipherNames.equals(List.of("A256GCM"));
+      To2Crypto.require(!hybrid || bound);
+      hashes = allowed(To2Algorithms.this.hashes, hashNames, minimum, false);
+      exchanges = allowed(To2Algorithms.this.exchanges, kexNames, minimum, hybrid);
+      ciphers = allowed(To2Algorithms.this.ciphers, cipherNames, minimum, false);
       for (CipherAdapter cipher : ciphers) {
         kdf(cipher.kdfName()).checkAvailable();
       }
@@ -491,6 +497,10 @@ public final class To2Algorithms {
       return ciphers;
     }
 
+    public boolean requiresPq() {
+      return hybrid;
+    }
+
     /**
      * Checks an identity provider and the configured strength floor.
      * @param key validated Device or Owner key
@@ -505,7 +515,7 @@ public final class To2Algorithms {
   }
 
   private static <T extends Adapter> List<T> allowed(Map<String, T> installed, List<String> names,
-                                                    int minimum)
+                                                    int minimum, boolean hybrid)
       throws IOException, GeneralSecurityException {
     To2Crypto.require(names != null && !names.isEmpty() && names.size() <= 32);
     List<T> result = new ArrayList<>();
@@ -513,7 +523,8 @@ public final class To2Algorithms {
     for (String name : names) {
       T adapter = named(installed, name);
       To2Crypto.require(unique.add(name) && adapter.descriptor().securityBits >= minimum
-          && adapter.descriptor().vendorCapability == null);
+          && (adapter.descriptor().vendorCapability == null
+            || (hybrid && To2HybridKex.CAPABILITY.equals(adapter.descriptor().vendorCapability))));
       adapter.checkAvailable();
       result.add(adapter);
     }
@@ -532,7 +543,7 @@ public final class To2Algorithms {
    */
   public Policy policy(List<String> hashes, List<String> exchanges, List<String> ciphers,
                        int minimum) throws IOException, GeneralSecurityException {
-    return new Policy(hashes, exchanges, ciphers, minimum);
+    return new Policy(hashes, exchanges, ciphers, minimum, false);
   }
 
   /**
@@ -555,15 +566,33 @@ public final class To2Algorithms {
     To2Crypto.require(json.isObject() && fields.equals(Set.of("profile", "hashes",
         "kex_preferences", "cipher_preferences", "minimum_security_bits", "require_pq_kex",
         "allow_classical_fallback")));
-    To2Crypto.require(json.get("profile").isTextual()
-        && json.get("profile").asText().equals("classical")
-        && json.get("require_pq_kex").isBoolean() && !json.get("require_pq_kex").asBoolean()
-        && json.get("allow_classical_fallback").isBoolean()
-        && !json.get("allow_classical_fallback").asBoolean()
-        && json.get("minimum_security_bits").isIntegralNumber()
-        && json.get("minimum_security_bits").canConvertToInt());
-    return policy(strings(json.get("hashes")), strings(json.get("kex_preferences")),
-        strings(json.get("cipher_preferences")), json.get("minimum_security_bits").asInt());
+    boolean hybrid = json.get("profile").asText().equals("hybrid-pq-v1");
+    To2Crypto.require(json.get("profile").isTextual());
+    To2Crypto.require(hybrid || json.get("profile").asText().equals("classical"));
+    To2Crypto.require(json.get("require_pq_kex").isBoolean());
+    To2Crypto.require(json.get("require_pq_kex").asBoolean() == hybrid);
+    To2Crypto.require(json.get("allow_classical_fallback").isBoolean());
+    To2Crypto.require(!json.get("allow_classical_fallback").asBoolean());
+    To2Crypto.require(json.get("minimum_security_bits").isIntegralNumber());
+    To2Crypto.require(json.get("minimum_security_bits").canConvertToInt());
+    List<String> hashes = strings(json.get("hashes"));
+    List<String> exchanges = strings(json.get("kex_preferences"));
+    List<String> ciphers = strings(json.get("cipher_preferences"));
+    int minimum = json.get("minimum_security_bits").asInt();
+    return new Policy(hashes, exchanges, ciphers, minimum, hybrid);
+  }
+
+  /**
+   * Adds an optional isolated PQ operation without changing the classical catalog.
+   * @return installed operations; policy checks availability only when selected
+   * @throws IOException invalid adapter metadata
+   */
+  public static To2Algorithms installed() throws IOException {
+    To2Algorithms base = classical();
+    List<KexAdapter> exchanges = new ArrayList<>(base.exchanges.values());
+    exchanges.add(new To2HybridKex());
+    return new To2Algorithms(base.hashes.values(), base.signatures.values(), exchanges,
+        base.kdfs.values(), base.ciphers.values());
   }
 
   private static List<String> strings(JsonNode node) throws IOException {

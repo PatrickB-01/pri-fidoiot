@@ -21,6 +21,82 @@ import org.junit.jupiter.api.Test;
 public class To2WireTest {
 
     @Test
+    public void hybridPolicyUnavailableProviderNeverFallsBack() throws Exception {
+        Path policy = Files.createTempFile("to2-hybrid-policy-", ".json");
+        Files.writeString(policy, "{\"profile\":\"hybrid-pq-v1\",\"hashes\":[\"SHA384\"],"
+                + "\"kex_preferences\":[\"" + To2HybridKex.NAME + "\"],"
+                + "\"cipher_preferences\":[\"A256GCM\"],\"minimum_security_bits\":192,"
+                + "\"require_pq_kex\":true,\"allow_classical_fallback\":false}");
+        String original = System.getProperty("to2.pq.provider.directory");
+        try {
+            System.clearProperty("to2.pq.provider.directory");
+            Assertions.assertThrows(IOException.class, () -> To2Algorithms.installed().loadPolicy(policy));
+            Assertions.assertThrows(IOException.class, () -> To2Algorithms.classical().loadPolicy(policy));
+            Assertions.assertFalse(To2Algorithms.installed().loadPolicy(null).requiresPq());
+        } finally {
+            if (original != null) {
+                System.setProperty("to2.pq.provider.directory", original);
+            }
+            Files.deleteIfExists(policy);
+        }
+    }
+
+    @Test
+    public void hybridNistDecapsulationAndCrossLanguageKdf() throws Exception {
+        String configured = System.getProperty("to2.pq.vectors");
+        Assumptions.assumeTrue(configured != null);
+        CBORObject vectors = CBORObject.FromJSONString(Files.readString(Path.of(configured)));
+        for (CBORObject sample : vectors.get("acvp").getValues()) {
+            byte[] privateKey = Hex.decodeHex(sample.get("dk").AsString());
+            byte[] ciphertext = Hex.decodeHex(sample.get("c").AsString());
+            byte[] input = To2Crypto.concat(privateKey, ciphertext);
+            byte[] actual = To2HybridKex.provider("decaps", input, 32);
+            Assertions.assertArrayEquals(Hex.decodeHex(sample.get("k").AsString()), actual);
+        }
+        CBORObject sample = vectors.get("acvp").get(0);
+        CBORObject vector = vectors.get("hybrid");
+        byte[] shared = To2HybridKex.combine(
+                Hex.decodeHex(vector.get("classical_secret_hex").AsString()),
+                Hex.decodeHex(sample.get("k").AsString()),
+                Hex.decodeHex(vector.get("device_ecdh_hex").AsString()),
+                Hex.decodeHex(sample.get("ek").AsString()),
+                Hex.decodeHex(vector.get("owner_ecdh_hex").AsString()),
+                Hex.decodeHex(sample.get("c").AsString()));
+        Assertions.assertArrayEquals(Hex.decodeHex(vector.get("combined_hex").AsString()), shared);
+        byte[] key = To2Algorithms.classical().kdf("FDO-HMAC-SHA256").derive(shared, 32);
+        Assertions.assertArrayEquals(Hex.decodeHex(vector.get("sevk_hex").AsString()), key);
+    }
+
+    @Test
+    public void hybridProviderRolesBoundsAndClose() throws Exception {
+        Assumptions.assumeTrue(System.getProperty("to2.pq.provider.directory") != null);
+        To2HybridKex adapter = new To2HybridKex();
+        adapter.checkAvailable();
+        java.security.KeyPairGenerator generator = java.security.KeyPairGenerator.getInstance("EC");
+        generator.initialize(new java.security.spec.ECGenParameterSpec("secp384r1"));
+        java.security.PublicKey owner = generator.generateKeyPair().getPublic();
+        try (To2Algorithms.KexState device = adapter.initiate(owner);
+                To2Algorithms.KexState remote = adapter.respond(owner)) {
+            Assertions.assertEquals(1336, device.contribution().length);
+            byte[] shared = remote.complete(device.contribution());
+            Assertions.assertEquals(1240, remote.contribution().length);
+            Assertions.assertArrayEquals(shared, device.complete(remote.contribution()));
+            Assertions.assertThrows(IOException.class, () -> device.complete(remote.contribution()));
+            device.close();
+            Assertions.assertThrows(IOException.class, device::contribution);
+        }
+        try (To2Algorithms.KexState device = adapter.initiate(owner)) {
+            Assertions.assertThrows(IOException.class, () -> device.complete(new byte[1240]));
+        }
+        Assertions.assertThrows(IOException.class,
+                () -> To2HybridKex.provider("encaps", new byte[1183], 1120));
+        byte[] invalid = new byte[1184];
+        Arrays.fill(invalid, (byte) 255);
+        Assertions.assertThrows(IOException.class,
+                () -> To2HybridKex.provider("encaps", invalid, 1120));
+    }
+
+    @Test
     public void estSupplierDefersSecretsAndRequiresAuthorizationAndMatchingReady() throws Exception {
     Path root = Files.createTempDirectory("est-isolated-test-");
     Path plans = root.resolve("plans");

@@ -51,6 +51,7 @@ public class To2V2Dispatcher implements MessageDispatcher, AutoCloseable {
     private final Map<String, To2Algorithms.KexAdapter> offeredExchanges = new HashMap<>();
     private final Map<Integer, To2Algorithms.CipherAdapter> offeredCiphers = new HashMap<>();
     private final int deviceLimit;
+    private int proofLimit = OWNER_PROOF_LIMIT;
     private int ownerInfoLimit;
     private int nextEntry;
     private int rounds;
@@ -135,7 +136,7 @@ public class To2V2Dispatcher implements MessageDispatcher, AutoCloseable {
 
   To2V2Dispatcher(To2OwnerFixtures fixtures, java.util.function.LongSupplier clock,
                   boolean sweep) throws IOException {
-    this(fixtures, clock, sweep, To2Algorithms.classical());
+    this(fixtures, clock, sweep, To2Algorithms.installed());
   }
 
   private To2V2Dispatcher(To2OwnerFixtures fixtures, java.util.function.LongSupplier clock,
@@ -240,6 +241,10 @@ public class To2V2Dispatcher implements MessageDispatcher, AutoCloseable {
     if (fixtures == null) {
       return plainError(request, 500);
     }
+    if (policy.requiresPq() && probe.get(1).getValues().stream()
+        .noneMatch(value -> To2HybridKex.CAPABILITY.equals(value.AsString()))) {
+      return plainError(request, 103);
+    }
     Session session = null;
     try {
       int limit = probe.get(3).AsInt32();
@@ -251,6 +256,12 @@ public class To2V2Dispatcher implements MessageDispatcher, AutoCloseable {
       To2Algorithms.HashAdapter hash = policy.chooseHash(hashes);
       To2OwnerFixtures.Identity identity = fixtures.reserve(probe.get(2).GetByteString());
       session = new Session(identity, request.getMessage(), limit, hash);
+      CBORObject vendors = To2Crypto.array(CONTRACT_CAPABILITY);
+      if (policy.requiresPq()) {
+        To2Crypto.require(limit >= To2HybridKex.PROOF_LIMIT);
+        session.proofLimit = To2HybridKex.PROOF_LIMIT;
+        vendors.Add(To2HybridKex.CAPABILITY);
+      }
       PublicKey owner = To2Crypto.publicKey(identity.ownerPublic);
       CBORObject exchanges = CBORObject.NewArray();
       for (To2Algorithms.KexAdapter adapter : policy.exchanges(owner)) {
@@ -266,7 +277,7 @@ public class To2V2Dispatcher implements MessageDispatcher, AutoCloseable {
       }
       CBORObject initialHash = To2Crypto.hash(identity.identityHash,
           identity.header.get(4).EncodeToBytes());
-      CBORObject ack = To2Crypto.array(new byte[] {4}, To2Crypto.array(CONTRACT_CAPABILITY),
+      CBORObject ack = To2Crypto.array(new byte[] {4}, vendors,
           session.guid, To2Codec.MAX_MESSAGE_BYTES,
           exchanges, ciphers, session.challenge,
           hash.digest(session.probe, initialHash.EncodeToBytes()));
@@ -375,7 +386,7 @@ public class To2V2Dispatcher implements MessageDispatcher, AutoCloseable {
     String ownerDomain = "FDO-TO2-ProveOVHdr-v1";
     CBORObject signedProof = ownerSigner.sign(proof, session.identity.ownerKey, owner, ownerDomain);
     byte[] wire = To2Codec.encodePlaintext(MsgType.TO2_PROVE_OV_HDR20, signedProof);
-    To2Crypto.require(wire.length <= OWNER_PROOF_LIMIT);
+    To2Crypto.require(wire.length <= Math.min(session.proofLimit, session.deviceLimit));
     session.expected = session.identity.voucher.get(4).size() == 0
         ? MsgType.TO2_DEVICE_SERVICE_INFO_RDY20 : MsgType.TO2_GET_OV_NEXT_ENTRY20;
     return reply(MsgType.TO2_PROVE_OV_HDR20, wire, request.getAuthToken().get());
