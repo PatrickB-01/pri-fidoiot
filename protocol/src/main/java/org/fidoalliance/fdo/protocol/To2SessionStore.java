@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
 
 public final class To2SessionStore<T extends AutoCloseable> implements AutoCloseable {
@@ -15,7 +16,8 @@ public final class To2SessionStore<T extends AutoCloseable> implements AutoClose
 
   private final class Entry {
     private final T value;
-    private long deadline;
+    private volatile long deadline;
+    private final ReentrantLock lock = new ReentrantLock();
     private boolean closed;
 
     private Entry(T value) {
@@ -93,13 +95,17 @@ public final class To2SessionStore<T extends AutoCloseable> implements AutoClose
     if (entry == null) {
       throw new IOException("unknown session");
     }
-    synchronized (entry) {
-      if (entry.closed || clock.getAsLong() - entry.deadline >= 0) {
+    entry.lock.lock();
+    try {
+      if (entry.closed || entries.get(token) != entry
+          || clock.getAsLong() - entry.deadline >= 0) {
         entries.remove(token, entry);
         entry.destroy();
         throw new IOException("expired session");
       }
       return operation.apply(entry.value);
+    } finally {
+      entry.lock.unlock();
     }
   }
 
@@ -111,8 +117,11 @@ public final class To2SessionStore<T extends AutoCloseable> implements AutoClose
   public void remove(String token) {
     Entry entry = entries.remove(token);
     if (entry != null) {
-      synchronized (entry) {
+      entry.lock.lock();
+      try {
         entry.destroy();
+      } finally {
+        entry.lock.unlock();
       }
     }
   }
@@ -120,10 +129,13 @@ public final class To2SessionStore<T extends AutoCloseable> implements AutoClose
   /** Evicts expired entries, including their private state. */
   public void expire() {
     entries.forEach((token, entry) -> {
-      synchronized (entry) {
-        if (clock.getAsLong() - entry.deadline >= 0) {
-          entries.remove(token, entry);
-          entry.destroy();
+      if (clock.getAsLong() - entry.deadline >= 0 && entry.lock.tryLock()) {
+        try {
+          if (clock.getAsLong() - entry.deadline >= 0 && entries.remove(token, entry)) {
+            entry.destroy();
+          }
+        } finally {
+          entry.lock.unlock();
         }
       }
     });
@@ -137,8 +149,11 @@ public final class To2SessionStore<T extends AutoCloseable> implements AutoClose
   public void shorten(String token, long lifetime) {
     Entry entry = entries.get(token);
     if (entry != null) {
-      synchronized (entry) {
+      entry.lock.lock();
+      try {
         entry.deadline = Math.min(entry.deadline, clock.getAsLong() + lifetime);
+      } finally {
+        entry.lock.unlock();
       }
     }
   }

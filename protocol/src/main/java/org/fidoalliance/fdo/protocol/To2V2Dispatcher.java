@@ -344,6 +344,11 @@ public class To2V2Dispatcher implements MessageDispatcher, AutoCloseable {
         default:
           return terminate(request, session, 101);
       }
+    } catch (To2MlKemPool.Failure exception) {
+      int code = exception.reason == To2MlKemPool.Reason.REJECTED ? 101 : 500;
+      Optional<DispatchMessage> error = terminate(request, session, code);
+      error.ifPresent(message -> message.setDiagnosticCategory(exception.category()));
+      return error;
     } catch (Exception exception) {
       return terminate(request, session, 101);
     }
@@ -584,7 +589,9 @@ public class To2V2Dispatcher implements MessageDispatcher, AutoCloseable {
       if (session.provisioning && session.channel != null) {
         raw = session.channel.encrypt(raw);
       }
-      return Optional.of(reply(MsgType.ERROR, raw, request.getAuthToken().get()));
+      DispatchMessage response = reply(MsgType.ERROR, raw, request.getAuthToken().get());
+      response.setDiagnosticErrorCode(code);
+      return Optional.of(response);
     } catch (GeneralSecurityException exception) {
       return plainError(request, code);
     } finally {
@@ -623,8 +630,10 @@ public class To2V2Dispatcher implements MessageDispatcher, AutoCloseable {
 
   private Optional<DispatchMessage> plainError(DispatchMessage request, int code)
       throws IOException {
-    return Optional.of(reply(MsgType.ERROR,
-        To2Codec.error(code, request.getMsgType().toInteger()), null));
+    DispatchMessage response = reply(MsgType.ERROR,
+        To2Codec.error(code, request.getMsgType().toInteger()), null);
+    response.setDiagnosticErrorCode(code);
+    return Optional.of(response);
   }
 
   private DispatchMessage reply(MsgType type, byte[] wire, String token) {

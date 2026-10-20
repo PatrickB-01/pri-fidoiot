@@ -24,6 +24,24 @@ public class DispatchMessage {
   private MsgType msgType;
   private String authToken;
   private SimpleStorage extra;
+  private Integer diagnosticErrorCode;
+  private String diagnosticCategory;
+
+  Integer getDiagnosticErrorCode() {
+    return diagnosticErrorCode;
+  }
+
+  void setDiagnosticErrorCode(int code) {
+    diagnosticErrorCode = code;
+  }
+
+  String getDiagnosticCategory() {
+    return diagnosticCategory;
+  }
+
+  void setDiagnosticCategory(String category) {
+    diagnosticCategory = category;
+  }
 
   private static void findCause(ErrorMessage error, Throwable throwable) {
   }

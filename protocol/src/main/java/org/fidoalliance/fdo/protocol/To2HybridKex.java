@@ -10,12 +10,14 @@ import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.spec.ECGenParameterSpec;
 import java.util.Arrays;
-import java.util.concurrent.TimeUnit;
 
 public final class To2HybridKex implements To2Algorithms.KexAdapter {
   public static final String CAPABILITY = "com.example.fdo.pq-kex-v1";
   public static final String NAME = "com.example.ecdh384-mlkem768-v1";
   public static final int PROOF_LIMIT = 4096;
+  private static To2MlKemPool providerPool;
+  private static Path providerDirectory;
+  private static boolean shutdownRegistered;
   private static final byte[] DOMAIN = ("thesis-to2-pq-v1;ECDH384;ML-KEM-768;SHA3-256;"
       + "FDO-HMAC-SHA256;SHA384;A256GCM;Device=xA;Owner=xB")
       .getBytes(StandardCharsets.US_ASCII);
@@ -78,24 +80,29 @@ public final class To2HybridKex implements To2Algorithms.KexAdapter {
     Path directory = Path.of(configured).toRealPath();
     To2Crypto.require(Files.isRegularFile(directory.resolve("MlKemProvider.class"))
         && Files.isRegularFile(directory.resolve("bcprov.jar")));
-    String executable = Path.of(System.getProperty("java.home"), "bin", "java").toString();
-    String classpath = directory + java.io.File.pathSeparator + directory.resolve("bcprov.jar");
-    Process process = new ProcessBuilder(executable, "-Xmx32m", "-cp", classpath,
-        "MlKemProvider", operation).redirectError(ProcessBuilder.Redirect.DISCARD).start();
-    try {
-      try (java.io.OutputStream output = process.getOutputStream()) {
-        output.write(input);
+    return pool(directory).execute(operation, input, expected);
+  }
+
+  private static synchronized To2MlKemPool pool(Path directory) throws IOException {
+    if (providerPool == null) {
+      providerPool = new To2MlKemPool(directory);
+      providerDirectory = directory;
+      if (!shutdownRegistered) {
+        Runtime.getRuntime().addShutdownHook(
+            new Thread(To2HybridKex::closeProvider, "to2-pq-shutdown"));
+        shutdownRegistered = true;
       }
-      To2Crypto.require(process.waitFor(10, TimeUnit.SECONDS) && process.exitValue() == 0);
-      byte[] result = process.getInputStream().readNBytes(expected + 1);
-      To2Crypto.require(result.length == expected);
-      return result;
-    } catch (InterruptedException exception) {
-      Thread.currentThread().interrupt();
-      throw new IOException("ML-KEM provider interrupted");
-    } finally {
-      process.destroyForcibly();
-      process.getInputStream().close();
+    } else if (!directory.equals(providerDirectory)) {
+      throw new IOException("ML-KEM provider directory changed while workers are active");
+    }
+    return providerPool;
+  }
+
+  static synchronized void closeProvider() {
+    if (providerPool != null) {
+      providerPool.close();
+      providerPool = null;
+      providerDirectory = null;
     }
   }
 

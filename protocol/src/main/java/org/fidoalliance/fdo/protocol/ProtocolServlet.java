@@ -127,6 +127,12 @@ public class ProtocolServlet extends HttpServlet {
 
   private void doVersion200(HttpServletRequest request, HttpServletResponse response,
                             String path) {
+    long started = System.nanoTime();
+    int requestBytes = 0;
+    int responseBytes = 0;
+    int responseType = 0;
+    Integer errorCode = null;
+    String failureCategory = null;
     int previousType = 0;
     boolean incomingError = path.equals("/fdo/200/msg/255");
     DispatchMessage message = null;
@@ -167,6 +173,7 @@ public class ProtocolServlet extends HttpServlet {
         throw new IOException("oversized body");
       }
       byte[] raw = request.getInputStream().readNBytes(To2Codec.MAX_MESSAGE_BYTES + 1);
+      requestBytes = raw.length;
       if (raw.length == 0 || raw.length > To2Codec.MAX_MESSAGE_BYTES
           || (declaredLength >= 0 && raw.length != declaredLength)) {
         throw new IOException("invalid body length");
@@ -175,6 +182,10 @@ public class ProtocolServlet extends HttpServlet {
       Optional<DispatchMessage> result = getDispatcher().dispatch(message);
       if (result.isPresent()) {
         DispatchMessage reply = result.get();
+        responseType = reply.getMsgType().toInteger();
+        errorCode = reply.getDiagnosticErrorCode();
+        failureCategory = reply.getDiagnosticCategory();
+        responseBytes = reply.getMessage().length;
         if (reply.getProtocolVersion() != ProtocolVersion.V200) {
           throw new IOException("wrong response version");
         }
@@ -189,8 +200,6 @@ public class ProtocolServlet extends HttpServlet {
         response.setStatus(200);
         response.setContentLength(0);
       }
-      logger.info("v200 type " + previousType + " bytes " + raw.length
-          + " status " + response.getStatus());
     } catch (Exception exception) {
       Optional<DispatchMessage> failureReply = Optional.empty();
       try {
@@ -207,22 +216,52 @@ public class ProtocolServlet extends HttpServlet {
         return;
       }
       response.setStatus(500);
+      responseType = 255;
+      errorCode = 100;
       response.setHeader(HttpUtils.HTTP_MESSAGE_TYPE, "255");
       try {
         if (failureReply.isPresent()) {
           DispatchMessage error = failureReply.get();
+          errorCode = error.getDiagnosticErrorCode();
+          failureCategory = error.getDiagnosticCategory();
+          responseBytes = error.getMessage().length;
           if (error.getAuthToken().isPresent()) {
             response.setHeader(HttpUtils.HTTP_AUTHORIZATION, error.getAuthToken().get());
           }
           writeVersion200(response, error.getMessage());
         } else {
-          writeVersion200(response, To2Codec.error(100, previousType));
+          byte[] error = To2Codec.error(100, previousType);
+          responseBytes = error.length;
+          writeVersion200(response, error);
         }
       } catch (IOException failure) {
         logger.error("v200 error response unavailable");
       }
-      logger.info("v200 request rejected status 500");
+    } finally {
+      long ended = System.nanoTime();
+      String trace = safeBenchmarkHeader(request, "X-Benchmark-Trace",
+          "device-[0-9]{4}", "unattributed");
+      String profile = safeBenchmarkHeader(request, "X-Benchmark-Profile",
+          "p256|p384|hybrid", "unknown");
+      String sequence = safeBenchmarkHeader(request, "X-Benchmark-Sequence",
+          "[1-9][0-9]{0,5}", "0");
+      logger.info("{\"schema\":\"thesis-to2-owner-event-v1\",\"role\":\"owner\","
+          + "\"phase\":\"exchange\",\"protocol_version\":200,\"run_id\":\"" + trace
+          + "\",\"profile\":\"" + profile + "\",\"sequence\":" + sequence
+          + ",\"message_type\":" + previousType + ",\"response_type\":" + responseType
+          + ",\"request_bytes\":" + requestBytes + ",\"response_bytes\":" + responseBytes
+          + ",\"start_monotonic_ns\":" + started + ",\"end_monotonic_ns\":" + ended
+          + ",\"duration_ns\":" + (ended - started) + ",\"status\":" + response.getStatus()
+          + ",\"result\":\"" + (response.getStatus() == 200 ? "success" : "failure")
+          + "\",\"error_code\":" + errorCode + ",\"failure_category\":"
+          + (failureCategory == null ? "null" : "\"" + failureCategory + "\"") + "}");
     }
+  }
+
+  private String safeBenchmarkHeader(HttpServletRequest request, String name,
+                                     String pattern, String fallback) {
+    String value = request.getHeader(name);
+    return value != null && value.length() <= 64 && value.matches(pattern) ? value : fallback;
   }
 
   private void writeVersion200(HttpServletResponse response, byte[] bytes) throws IOException {
